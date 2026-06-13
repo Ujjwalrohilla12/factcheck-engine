@@ -43,6 +43,8 @@ class ReportGenerator:
                 "Key Finding",
                 "Sources",
                 "Search Query",
+                "Needs Review",
+                "Review Reason",
             ],
         )
         writer.writeheader()
@@ -61,6 +63,8 @@ class ReportGenerator:
                 "Key Finding": result.get("key_finding", ""),
                 "Sources": sources,
                 "Search Query": result.get("search_query", ""),
+                "Needs Review": "Yes" if result.get("needs_review") else "No",
+                "Review Reason": result.get("review_reason", ""),
             })
 
         csv_content = output.getvalue()

@@ -8,10 +8,25 @@ from functools import lru_cache
 from typing import Any
 
 import requests
+from requests.exceptions import HTTPError, RequestException, Timeout
 
 from utils.constants import ERROR_API_KEY, REQUEST_TIMEOUT_SECONDS, SEARCH_RESULTS_COUNT
+from utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
+
+CLAIM_TYPE_QUERY_TEMPLATES: dict[str, str] = {
+    "Market Statistic": 'market size statistic "{claim}" latest data',
+    "Financial Number": 'financial figure "{claim}" official report',
+    "User Count": 'user count active users "{claim}" official',
+    "Growth Rate": 'growth rate percentage "{claim}" verified',
+    "Date": 'event date timeline "{claim}" confirmed',
+    "Technical Figure": 'technical specification "{claim}" verified',
+    "Technical Specification": 'technical specification "{claim}" datasheet',
+    "Revenue": 'company revenue earnings "{claim}" official filing',
+    "Percentage": 'percentage statistic "{claim}" credible source',
+    "Other": 'Verify claim: {claim}',
+}
 
 
 class SearchService:
@@ -22,6 +37,12 @@ class SearchService:
         if not self.api_key:
             raise ValueError(ERROR_API_KEY)
         self.base_url = "https://api.tavily.com/search"
+
+    @staticmethod
+    def build_query(claim: str, claim_type: str = "Other") -> str:
+        """Build a claim-type-specific search query."""
+        template = CLAIM_TYPE_QUERY_TEMPLATES.get(claim_type, CLAIM_TYPE_QUERY_TEMPLATES["Other"])
+        return template.format(claim=claim.strip())
 
     def search(self, query: str, max_results: int = SEARCH_RESULTS_COUNT) -> tuple[list[dict[str, Any]], str | None]:
         """Search Tavily and return normalized results."""
@@ -43,20 +64,28 @@ class SearchService:
             "include_images": False,
         }
 
-        try:
+        def _perform_search() -> list[dict[str, Any]]:
             response = requests.post(
                 "https://api.tavily.com/search",
                 json=payload,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-            data = response.json()
-        except requests.Timeout:
-            return [], "Search request timed out."
-        except requests.HTTPError as exc:
+            return response.json()
+
+        try:
+            data = retry_with_backoff(
+                _perform_search,
+                max_attempts=3,
+                base_delay=1.0,
+                retry_exceptions=(Timeout, HTTPError, RequestException),
+            )
+        except Timeout:
+            return [], "Search request timed out after retries."
+        except HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             return [], f"Tavily search failed with status {status}."
-        except requests.RequestException as exc:
+        except RequestException as exc:
             return [], f"Tavily search error: {exc}"
         except ValueError:
             return [], "Tavily returned invalid JSON."
@@ -82,11 +111,12 @@ class SearchService:
                 "score": item.get("score", 0),
             })
 
-        return results[: max_results + 1], None
+        ranked = sorted(results, key=lambda item: item.get("score", 0), reverse=True)
+        return ranked[: max_results + 1], None
 
-    def search_claim(self, claim: str) -> tuple[dict[str, Any], str | None]:
-        """Search the requested verification query and format evidence."""
-        query = f"Verify claim: {claim}"
+    def search_claim(self, claim: str, claim_type: str = "Other") -> tuple[dict[str, Any], str | None]:
+        """Search using a claim-type-specific query and format evidence."""
+        query = self.build_query(claim, claim_type)
         results, error = self.search(query, SEARCH_RESULTS_COUNT)
         if error:
             return {"query": query, "sources": [], "evidence": ""}, error

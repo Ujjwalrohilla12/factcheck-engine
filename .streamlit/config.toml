@@ -12,6 +12,6 @@ showErrorDetails = true
 level = "info"
 
 [server]
-maxUploadSize = 25
+maxUploadSize = 50
 enableXsrfProtection = true
 enableCORS = false

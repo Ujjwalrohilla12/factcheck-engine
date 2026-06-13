@@ -33,6 +33,10 @@ REM Install dependencies
 echo Installing dependencies...
 pip install -r requirements.txt > nul
 
+REM Create sample PDF for testing
+echo Creating sample PDF...
+python scripts\create_sample_pdf.py > nul
+
 REM Check if .env exists
 if not exist ".env" (
     echo Creating .env file...

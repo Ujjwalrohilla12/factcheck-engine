@@ -21,6 +21,7 @@ from utils.constants import (
     STATUS_UNVERIFIABLE,
 )
 from utils.helpers import extract_json_from_text, safe_int
+from utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -147,17 +148,26 @@ class LLMService:
         max_tokens: int,
     ) -> str:
         """Call Chat Completions in JSON-object mode."""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+
+        def _call() -> str:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return response.choices[0].message.content or "{}"
+
+        return retry_with_backoff(
+            _call,
+            max_attempts=3,
+            base_delay=1.5,
+            retry_exceptions=(RateLimitError, APIError),
         )
-        return response.choices[0].message.content or "{}"
 
     @staticmethod
     def default_verification(explanation: str) -> dict[str, Any]:

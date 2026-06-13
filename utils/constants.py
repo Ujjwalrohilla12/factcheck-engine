@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 
 APP_NAME = "FactCheck AI"
-MAX_PDF_SIZE_MB = 25
+MAX_PDF_SIZE_MB = 50
 MAX_PDF_SIZE_BYTES = MAX_PDF_SIZE_MB * 1024 * 1024
+HUMAN_REVIEW_THRESHOLD = int(os.getenv("HUMAN_REVIEW_THRESHOLD", "60"))
 
 SEARCH_RESULTS_COUNT = int(os.getenv("SEARCH_RESULTS_COUNT", "5"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))

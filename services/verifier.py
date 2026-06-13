@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from services.llm_service import LLMService
 from services.search_service import SearchService
-from utils.constants import STATUS_UNVERIFIABLE
+from utils.constants import HUMAN_REVIEW_THRESHOLD, STATUS_INACCURATE, STATUS_UNVERIFIABLE
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +67,12 @@ class Verifier:
             "sources": [],
             "search_query": f"Verify claim: {claim}",
             "evidence_snippet": "",
+            "needs_review": True,
+            "review_reason": "Verification could not be completed automatically.",
         }
 
         logger.debug(f"Searching for evidence...")
-        evidence_bundle, search_error = self.search_service.search_claim(claim)
+        evidence_bundle, search_error = self.search_service.search_claim(claim, claim_type)
         base_result["search_query"] = evidence_bundle.get("query", base_result["search_query"])
         base_result["sources"] = evidence_bundle.get("sources", [])
         base_result["evidence_snippet"] = evidence_bundle.get("evidence", "")[:1200]
@@ -95,4 +97,27 @@ class Verifier:
 
         logger.debug(f"Verification complete: status={verification.get('status')}, confidence={verification.get('confidence')}%")
         base_result.update(verification)
+
+        confidence = int(base_result.get("confidence", 0))
+        sources = base_result.get("sources", [])
+        status = base_result.get("status", STATUS_UNVERIFIABLE)
+
+        if confidence < HUMAN_REVIEW_THRESHOLD:
+            base_result["needs_review"] = True
+            base_result["review_reason"] = (
+                f"Confidence {confidence}% is below the {HUMAN_REVIEW_THRESHOLD}% review threshold."
+            )
+        else:
+            base_result["needs_review"] = False
+            base_result["review_reason"] = ""
+
+        if status == STATUS_INACCURATE and not sources:
+            base_result["status"] = STATUS_UNVERIFIABLE
+            base_result["needs_review"] = True
+            base_result["review_reason"] = "No supporting source URL found; verdict downgraded for review."
+            base_result["explanation"] = (
+                str(base_result.get("explanation", "")).strip()
+                + " No credible source URL was returned, so this claim requires human review."
+            ).strip()
+
         return base_result
