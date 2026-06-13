@@ -1,4 +1,4 @@
-"""FactCheck AI Streamlit application — PPT-aligned working dashboard."""
+"""FactCheck AI Streamlit application."""
 
 from __future__ import annotations
 
@@ -10,15 +10,59 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
 
-from services.claim_extractor import ClaimExtractor
-from services.demo_data import load_demo_session
-from services.pdf_parser import PDFParser
-from services.pipeline import FactCheckPipeline
-from services.report_generator import ReportGenerator
-from services.verifier import Verifier
-from ui.components import (
+# ── 1. Load .env for local dev (no-op on Streamlit Cloud) ────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+# ── 2. Inject Streamlit Cloud secrets into os.environ FIRST ──────────────────
+#    Must happen before any import that calls os.getenv at module level.
+def _load_streamlit_secrets() -> dict[str, bool]:
+    """Copy every Streamlit secret into os.environ. Returns a status dict."""
+    status: dict[str, bool] = {"openai": False, "tavily": False, "loaded": False}
+    try:
+        secrets = st.secrets          # raises FileNotFoundError if no secrets configured
+        status["loaded"] = True
+        _KEYS = (
+            "OPENAI_API_KEY",
+            "TAVILY_API_KEY",
+            "LLM_MODEL",
+            "SEARCH_RESULTS_COUNT",
+            "REQUEST_TIMEOUT_SECONDS",
+        )
+        for key in _KEYS:
+            # Accept both flat and nested [general] section
+            value = None
+            if key in secrets:
+                value = str(secrets[key]).strip()
+            elif hasattr(secrets, "general") and key in secrets.general:
+                value = str(secrets.general[key]).strip()
+            if value:
+                os.environ[key] = value
+        status["openai"] = bool(os.getenv("OPENAI_API_KEY", ""))
+        status["tavily"] = bool(os.getenv("TAVILY_API_KEY", ""))
+    except FileNotFoundError:
+        # No secrets file — local dev relies on .env loaded above
+        status["openai"] = bool(os.getenv("OPENAI_API_KEY", ""))
+        status["tavily"] = bool(os.getenv("TAVILY_API_KEY", ""))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Secrets load warning: %s", exc)
+    return status
+
+
+_secrets_status = _load_streamlit_secrets()
+
+# ── 3. Now safe to import services (they call os.getenv at instantiation) ─────
+from services.claim_extractor import ClaimExtractor          # noqa: E402
+from services.demo_data import load_demo_session             # noqa: E402
+from services.pdf_parser import PDFParser                    # noqa: E402
+from services.pipeline import FactCheckPipeline              # noqa: E402
+from services.report_generator import ReportGenerator        # noqa: E402
+from services.verifier import Verifier                       # noqa: E402
+from ui.components import (                                  # noqa: E402
     render_architecture_panel,
     render_dashboard_header,
     render_hero,
@@ -29,8 +73,8 @@ from ui.components import (
     render_verification_results,
     render_workflow,
 )
-from ui.theme import PPT_THEME_CSS
-from utils.constants import (
+from ui.theme import PPT_THEME_CSS                           # noqa: E402
+from utils.constants import (                                # noqa: E402
     APP_NAME,
     ERROR_API_KEY,
     HUMAN_REVIEW_THRESHOLD,
@@ -40,8 +84,11 @@ from utils.constants import (
     SUPPORTED_MODELS,
     get_default_model,
 )
-from utils.helpers import calculate_claim_statistics, truncate_text, validate_pdf_file
-
+from utils.helpers import (                                  # noqa: E402
+    calculate_claim_statistics,
+    truncate_text,
+    validate_pdf_file,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,38 +96,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
 BASE_DIR = Path(__file__).parent
 SAMPLE_PDF_PATH = BASE_DIR / "assets" / "sample_report.pdf"
 
-
-def configure_cloud_secrets() -> None:
-    """Pull all secrets from Streamlit secrets into os.environ before any service runs."""
-    all_keys = (
-        "OPENAI_API_KEY",
-        "TAVILY_API_KEY",
-        "LLM_MODEL",
-        "SEARCH_RESULTS_COUNT",
-        "REQUEST_TIMEOUT_SECONDS",
-    )
-    try:
-        for key in all_keys:
-            if not os.getenv(key) and key in st.secrets:
-                os.environ[key] = str(st.secrets[key])
-    except Exception:
-        pass
-
-
-configure_cloud_secrets()
-
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title=APP_NAME,
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
 st.markdown(PPT_THEME_CSS, unsafe_allow_html=True)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def has_required_keys() -> bool:
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
+    return bool(
+        openai_key
+        and tavily_key
+        and not openai_key.startswith("sk-your")
+        and not tavily_key.startswith("tvly-your")
+        and len(openai_key) > 20
+        and len(tavily_key) > 20
+    )
 
 
 def init_state() -> None:
@@ -97,123 +137,108 @@ def init_state() -> None:
         st.session_state.setdefault(key, value)
 
 
-def has_required_keys() -> bool:
-    openai_key = os.getenv("OPENAI_API_KEY", "")
-    tavily_key = os.getenv("TAVILY_API_KEY", "")
-    return bool(
-        openai_key
-        and tavily_key
-        and not openai_key.startswith("sk-your")
-        and not tavily_key.startswith("tvly-your")
-        and len(openai_key) > 20
-        and len(tavily_key) > 20
-    )
-
-
 def set_workflow_step(step: int) -> None:
     st.session_state.workflow_step = max(1, min(step, 8))
 
 
-def apply_api_keys_from_sidebar() -> None:
-    with st.sidebar.expander("🔑 API Keys", expanded=not has_required_keys()):
-        openai_key = st.text_input(
-            "OpenAI API Key",
-            value=os.getenv("OPENAI_API_KEY", ""),
-            type="password",
-            placeholder="sk-...",
-        )
-        tavily_key = st.text_input(
-            "Tavily API Key",
-            value=os.getenv("TAVILY_API_KEY", ""),
-            type="password",
-            placeholder="tvly-...",
-        )
-        if openai_key.strip():
-            os.environ["OPENAI_API_KEY"] = openai_key.strip()
-        if tavily_key.strip():
-            os.environ["TAVILY_API_KEY"] = tavily_key.strip()
-
-        if has_required_keys():
-            st.success("API keys configured for this session.")
-        else:
-            st.warning("Add both keys to run live PDF verification.")
-
-
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 def sidebar_controls():
-    apply_api_keys_from_sidebar()
-
     with st.sidebar:
-        st.markdown("### ⚙️ Configuration")
-        st.caption("Upload a PDF, run the pipeline, or load the demo session.")
-        st.divider()
+        # Sidebar branding
+        st.markdown(
+            """
+            <div class="sidebar-brand">
+                <div class="sidebar-logo">🔍</div>
+                <div>
+                    <div class="sidebar-title">FactCheck AI</div>
+                    <div class="sidebar-sub">PDF Claim Verifier</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # API status pill — no keys exposed, just green/red dot
+        if has_required_keys():
+            st.markdown('<div class="api-status ok">⬤ &nbsp;API Connected</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="api-status warn">⬤ &nbsp;API Keys Missing</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="sidebar-section-label">DOCUMENT</div>', unsafe_allow_html=True)
 
         uploaded_file = st.file_uploader(
-            "📄 Upload Document",
+            "Upload PDF",
             type=["pdf"],
             help=f"Maximum size: {MAX_PDF_SIZE_MB} MB.",
+            label_visibility="collapsed",
         )
 
         if SAMPLE_PDF_PATH.exists():
-            with open(SAMPLE_PDF_PATH, "rb") as sample_file:
+            with open(SAMPLE_PDF_PATH, "rb") as f:
                 st.download_button(
                     "⬇️ Download Sample PDF",
-                    data=sample_file.read(),
+                    data=f.read(),
                     file_name="sample_report.pdf",
                     mime="application/pdf",
                     use_container_width=True,
                 )
 
-        st.divider()
-        _default_model = get_default_model()
+        st.markdown('<div class="sidebar-section-label">MODEL & SETTINGS</div>', unsafe_allow_html=True)
+        _default = get_default_model()
         model = st.selectbox(
-            "🤖 AI Model",
+            "AI Model",
             SUPPORTED_MODELS,
-            index=SUPPORTED_MODELS.index(_default_model) if _default_model in SUPPORTED_MODELS else 0,
+            index=SUPPORTED_MODELS.index(_default) if _default in SUPPORTED_MODELS else 0,
+            label_visibility="collapsed",
         )
         remove_duplicates = st.toggle("🔄 Remove duplicate claims", value=True)
-        max_claims = st.slider("📊 Maximum claims", 5, 100, 40, step=5)
+        max_claims = st.slider("📊 Max claims", 5, 100, 40, step=5)
         min_confidence = st.slider(
-            "🎯 Minimum confidence to show",
-            0,
-            100,
-            0,
-            step=5,
+            "🎯 Min confidence",
+            0, 100, 0, step=5,
             help=f"Claims below {HUMAN_REVIEW_THRESHOLD}% are flagged for human review.",
         )
 
-        st.divider()
+        st.markdown('<div class="sidebar-section-label">DEMO</div>', unsafe_allow_html=True)
         if st.button("🎬 Load Demo Dashboard", use_container_width=True):
             load_demo_session(st.session_state)
             st.rerun()
 
         if st.session_state.get("demo_mode"):
-            st.info("Demo session loaded. Upload a PDF and run live verification anytime.")
+            st.markdown('<div class="demo-badge">⚡ Demo session active</div>', unsafe_allow_html=True)
 
     return uploaded_file, model, remove_duplicates, max_claims, min_confidence
 
 
+# ── Pipeline actions ──────────────────────────────────────────────────────────
 def reset_for_new_file(uploaded_file) -> None:
     if uploaded_file and uploaded_file.name != st.session_state.document_name:
-        st.session_state.extracted_text = ""
-        st.session_state.extracted_claims = []
-        st.session_state.verification_results = []
-        st.session_state.document_metadata = {}
-        st.session_state.document_name = uploaded_file.name
-        st.session_state.demo_mode = False
+        st.session_state.update({
+            "extracted_text": "",
+            "extracted_claims": [],
+            "verification_results": [],
+            "document_metadata": {},
+            "document_name": uploaded_file.name,
+            "demo_mode": False,
+        })
         set_workflow_step(1)
 
 
 def apply_pipeline_result(result: dict) -> None:
-    st.session_state.extracted_text = result["extracted_text"]
-    st.session_state.extracted_claims = result["extracted_claims"]
-    st.session_state.verification_results = result["verification_results"]
-    st.session_state.document_metadata = result["document_metadata"]
-    st.session_state.document_name = result["document_name"]
-    st.session_state.demo_mode = False
+    st.session_state.update({
+        "extracted_text": result["extracted_text"],
+        "extracted_claims": result["extracted_claims"],
+        "verification_results": result["verification_results"],
+        "document_metadata": result["document_metadata"],
+        "document_name": result["document_name"],
+        "demo_mode": False,
+    })
     set_workflow_step(8)
 
 
-def extract_text_and_claims(uploaded_file, model: str, remove_duplicates: bool, max_claims: int) -> None:
+def extract_text_and_claims(
+    uploaded_file, model: str, remove_duplicates: bool, max_claims: int
+) -> None:
     if not has_required_keys():
         st.error(ERROR_API_KEY)
         return
@@ -240,11 +265,9 @@ def extract_text_and_claims(uploaded_file, model: str, remove_duplicates: bool, 
 
         extractor = ClaimExtractor(model=model)
         claims, claim_error = extractor.extract_and_process_claims(
-            text,
-            remove_duplicates=remove_duplicates,
-            max_claims=max_claims,
+            text, remove_duplicates=remove_duplicates, max_claims=max_claims,
         )
-        progress.progress(100, text="Steps 3–4 complete · Claims extracted and deduplicated.")
+        progress.progress(100, text="Steps 3–4 complete · Claims extracted.")
         progress.empty()
 
         if claim_error:
@@ -275,25 +298,21 @@ def verify_claims(model: str, min_confidence: int) -> None:
 
     verifier = Verifier(model=model)
     progress = st.progress(0, text="Step 5/8 · Searching live web evidence...")
-    status = st.empty()
+    status_placeholder = st.empty()
 
     def on_progress(current: int, total: int) -> None:
-        percent = int((current / total) * 100) if total else 0
-        if percent < 70:
-            progress.progress(percent, text=f"Step 5/8 · Web search ({current}/{total})")
-        else:
-            progress.progress(percent, text=f"Step 6/8 · AI verdict ({current}/{total})")
-        status.caption(f"Checking claim {min(current + 1, total)} of {total}")
+        pct = int((current / total) * 100) if total else 0
+        label = f"Step 5/8 · Web search ({current}/{total})" if pct < 70 else f"Step 6/8 · AI verdict ({current}/{total})"
+        progress.progress(pct, text=label)
+        status_placeholder.caption(f"Checking claim {min(current + 1, total)} of {total}")
 
     try:
         set_workflow_step(5)
         results, error = verifier.verify_claims(
-            claims,
-            progress_callback=on_progress,
-            min_confidence=min_confidence,
+            claims, progress_callback=on_progress, min_confidence=min_confidence,
         )
         progress.progress(100, text="Steps 6–7 complete · Confidence scores assigned.")
-        status.empty()
+        status_placeholder.empty()
         progress.empty()
 
         if error:
@@ -303,21 +322,18 @@ def verify_claims(model: str, min_confidence: int) -> None:
         st.session_state.verification_results = results
         st.session_state.demo_mode = False
         set_workflow_step(7)
-        review_count = sum(1 for item in results if item.get("needs_review"))
+        review_count = sum(1 for r in results if r.get("needs_review"))
         st.success(f"Verified {len(results)} claims. {review_count} flagged for human review.")
     except Exception as exc:
         logger.exception("Unexpected error during verification: %s", exc)
         progress.empty()
-        status.empty()
+        status_placeholder.empty()
         st.error(f"An unexpected error occurred: {exc}")
 
 
 def run_full_pipeline(
-    uploaded_file,
-    model: str,
-    remove_duplicates: bool,
-    max_claims: int,
-    min_confidence: int,
+    uploaded_file, model: str, remove_duplicates: bool,
+    max_claims: int, min_confidence: int,
 ) -> None:
     if not has_required_keys():
         st.error(ERROR_API_KEY)
@@ -325,11 +341,11 @@ def run_full_pipeline(
 
     pipeline = FactCheckPipeline(model=model)
     progress = st.progress(0, text="Starting full verification pipeline...")
-    status = st.empty()
+    status_placeholder = st.empty()
 
     def on_progress(message: str, percent: int) -> None:
         progress.progress(min(percent, 100), text=message)
-        status.caption(message)
+        status_placeholder.caption(message)
 
     try:
         result, error = pipeline.run(
@@ -340,14 +356,14 @@ def run_full_pipeline(
             progress_callback=on_progress,
         )
         progress.empty()
-        status.empty()
+        status_placeholder.empty()
 
         if error:
             st.error(error)
             return
 
         apply_pipeline_result(result)
-        review_count = sum(1 for item in result["verification_results"] if item.get("needs_review"))
+        review_count = sum(1 for r in result["verification_results"] if r.get("needs_review"))
         st.success(
             f"Pipeline complete: {len(result['extracted_claims'])} claims extracted, "
             f"{len(result['verification_results'])} verified, {review_count} need review."
@@ -355,11 +371,15 @@ def run_full_pipeline(
     except Exception as exc:
         logger.exception("Pipeline failed: %s", exc)
         progress.empty()
-        status.empty()
+        status_placeholder.empty()
         st.error(f"Pipeline failed: {exc}")
 
 
-def render_upload_panel(uploaded_file, model: str, remove_duplicates: bool, max_claims: int, min_confidence: int) -> None:
+# ── Render panels ─────────────────────────────────────────────────────────────
+def render_upload_panel(
+    uploaded_file, model: str, remove_duplicates: bool,
+    max_claims: int, min_confidence: int,
+) -> None:
     st.markdown(
         """
         <div class="section-card">
@@ -383,8 +403,7 @@ def render_upload_panel(uploaded_file, model: str, remove_duplicates: bool, max_
     if error:
         st.error(error)
     else:
-        size_mb = uploaded_file.size / (1024 * 1024)
-        st.success(f"Selected: {uploaded_file.name} ({size_mb:.2f} MB)")
+        st.success(f"Selected: {uploaded_file.name} ({uploaded_file.size / 1048576:.2f} MB)")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -396,13 +415,10 @@ def render_upload_panel(uploaded_file, model: str, remove_duplicates: bool, max_
 
     metadata = st.session_state.document_metadata
     if metadata:
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Pages", metadata.get("pages", 0))
-        with col2:
-            st.metric("File Size", f"{metadata.get('file_size_mb', 0):.2f} MB")
-        with col3:
-            st.metric("Characters", f"{len(st.session_state.extracted_text):,}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Pages", metadata.get("pages", 0))
+        c2.metric("File Size", f"{metadata.get('file_size_mb', 0):.2f} MB")
+        c3.metric("Characters", f"{len(st.session_state.extracted_text):,}")
 
 
 def render_claims_panel(model: str, min_confidence: int) -> None:
@@ -429,12 +445,12 @@ def render_detailed_report() -> None:
         return
 
     stats = calculate_claim_statistics(results)
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Total", stats["total"])
-    col2.metric("Verified", stats["verified"])
-    col3.metric("Inaccurate", stats["inaccurate"])
-    col4.metric("False", stats["false"])
-    col5.metric("Avg Confidence", f"{stats['avg_confidence']}%")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total", stats["total"])
+    c2.metric("Verified", stats["verified"])
+    c3.metric("Inaccurate", stats["inaccurate"])
+    c4.metric("False", stats["false"])
+    c5.metric("Avg Confidence", f"{stats['avg_confidence']}%")
 
     st.markdown("---")
     for index, result in enumerate(results, start=1):
@@ -465,31 +481,21 @@ def render_detailed_report() -> None:
                 """,
                 unsafe_allow_html=True,
             )
-
             if result.get("key_finding"):
                 st.markdown(f"**Key Finding:** {result['key_finding']}")
-
             if result.get("sources"):
                 st.markdown("**Sources:**")
                 for source in result["sources"]:
                     url = source.get("url", "")
                     title = source.get("title", "Source")
-                    if url:
-                        st.markdown(f"- [{title}]({url})")
-                    else:
-                        st.markdown(f"- {title}")
-
+                    st.markdown(f"- [{title}]({url})" if url else f"- {title}")
             if result.get("evidence_snippet"):
                 with st.popover("View Evidence"):
                     st.text(result["evidence_snippet"])
 
 
 def _status_css(status: str) -> str:
-    return {
-        "Verified": "verified",
-        "Inaccurate": "inaccurate",
-        "False": "false",
-    }.get(status, "unverifiable")
+    return {"Verified": "verified", "Inaccurate": "inaccurate", "False": "false"}.get(status, "unverifiable")
 
 
 def render_download_panel() -> None:
@@ -501,7 +507,6 @@ def render_download_panel() -> None:
     generator = ReportGenerator()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     set_workflow_step(8)
-    csv_error = pdf_error = md_error = None
 
     st.markdown(
         """
@@ -514,95 +519,32 @@ def render_download_panel() -> None:
     )
 
     col1, col2, col3 = st.columns(3)
-
     with col1:
-        st.markdown(
-            """
-            <div class="report-card">
-                <h4>📊 CSV Export</h4>
-                <ul>
-                    <li>One row per claim</li>
-                    <li>Verdict + confidence + correction</li>
-                    <li>Source URLs for each claim</li>
-                </ul>
-                <div class="report-audience">Ideal for: Analysts & Data Teams</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        csv_data, csv_error = generator.generate_csv_report(results)
-        if csv_error:
-            st.error(csv_error)
+        st.markdown("<div class='report-card'><h4>📊 CSV Export</h4><div class='report-audience'>Analysts & Data Teams</div></div>", unsafe_allow_html=True)
+        csv_data, csv_err = generator.generate_csv_report(results)
+        if csv_err:
+            st.error(csv_err)
         else:
-            st.download_button(
-                "Download CSV",
-                data=csv_data,
-                file_name=f"factcheck_report_{timestamp}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key="csv_download",
-            )
+            st.download_button("Download CSV", data=csv_data, file_name=f"factcheck_report_{timestamp}.csv", mime="text/csv", use_container_width=True, key="csv_download")
 
     with col2:
-        st.markdown(
-            """
-            <div class="report-card">
-                <h4>📄 PDF Report</h4>
-                <ul>
-                    <li>Executive summary section</li>
-                    <li>Colour-coded claim table</li>
-                    <li>Evidence excerpts included</li>
-                </ul>
-                <div class="report-audience">Ideal for: Executives & Clients</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        pdf_data, pdf_error = generator.generate_pdf_report(results)
-        if pdf_error:
-            st.error(pdf_error)
+        st.markdown("<div class='report-card'><h4>📄 PDF Report</h4><div class='report-audience'>Executives & Clients</div></div>", unsafe_allow_html=True)
+        pdf_data, pdf_err = generator.generate_pdf_report(results)
+        if pdf_err:
+            st.error(pdf_err)
         else:
-            st.download_button(
-                "Download PDF",
-                data=pdf_data,
-                file_name=f"factcheck_report_{timestamp}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                key="pdf_download",
-            )
+            st.download_button("Download PDF", data=pdf_data, file_name=f"factcheck_report_{timestamp}.pdf", mime="application/pdf", use_container_width=True, key="pdf_download")
 
     with col3:
-        st.markdown(
-            """
-            <div class="report-card">
-                <h4>📝 Markdown Export</h4>
-                <ul>
-                    <li>GitHub-compatible format</li>
-                    <li>Clean heading structure</li>
-                    <li>Hyperlinked source citations</li>
-                </ul>
-                <div class="report-audience">Ideal for: Developers & Docs Teams</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        md_data, md_error = generator.generate_markdown_report(results)
-        if md_error:
-            st.error(md_error)
+        st.markdown("<div class='report-card'><h4>📝 Markdown Export</h4><div class='report-audience'>Developers & Docs Teams</div></div>", unsafe_allow_html=True)
+        md_data, md_err = generator.generate_markdown_report(results)
+        if md_err:
+            st.error(md_err)
         else:
-            st.download_button(
-                "Download Markdown",
-                data=md_data,
-                file_name=f"factcheck_report_{timestamp}.md",
-                mime="text/markdown",
-                use_container_width=True,
-                key="md_download",
-            )
-
-    if not any([csv_error, pdf_error, md_error]):
-        st.success("All report formats are ready to download.")
+            st.download_button("Download Markdown", data=md_data, file_name=f"factcheck_report_{timestamp}.md", mime="text/markdown", use_container_width=True, key="md_download")
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
     init_state()
     render_hero()
@@ -611,9 +553,15 @@ def main() -> None:
     reset_for_new_file(uploaded_file)
 
     if not has_required_keys() and not st.session_state.get("demo_mode"):
-        st.warning(
-            "Live verification needs OpenAI and Tavily API keys. "
-            "Enter them in the sidebar, or click **Load Demo Dashboard** to explore the working UI."
+        st.markdown(
+            """
+            <div class="banner-warn">
+                🔑 <strong>API keys not configured.</strong>
+                Add <code>OPENAI_API_KEY</code> and <code>TAVILY_API_KEY</code> to Streamlit Cloud secrets,
+                or click <strong>Load Demo Dashboard</strong> to explore the UI.
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
     render_dashboard_header()
@@ -628,17 +576,12 @@ def main() -> None:
         render_verification_results(st.session_state.verification_results)
 
     tab_report, tab_download, tab_about = st.tabs([
-        "📊 Detailed Report",
-        "📥 Download Reports",
-        "ℹ️ About Project",
+        "📊 Detailed Report", "📥 Download Reports", "ℹ️ About Project",
     ])
-
     with tab_report:
         render_detailed_report()
-
     with tab_download:
         render_download_panel()
-
     with tab_about:
         st.markdown("### Solution Overview")
         render_solution_overview()

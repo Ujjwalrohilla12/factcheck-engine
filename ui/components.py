@@ -31,17 +31,17 @@ def render_hero() -> None:
     st.markdown(
         """
         <div class="hero-wrap">
-            <div class="hero-kicker">AI-POWERED</div>
+            <div class="hero-kicker">AI-Powered Fact Verification</div>
             <div class="hero-title">FactCheck AI</div>
-            <div class="hero-subtitle">Automated PDF Claim Verification System</div>
+            <div class="hero-subtitle">Upload any PDF — we extract claims, search the web, and deliver verdicts in seconds.</div>
             <div class="hero-badges">
-                <span class="badge verified">✓ VERIFIED</span>
-                <span class="badge inaccurate">~ INACCURATE</span>
-                <span class="badge false">✗ FALSE</span>
+                <span class="badge verified">✓ Verified</span>
+                <span class="badge inaccurate">~ Inaccurate</span>
+                <span class="badge false">✗ False</span>
+                <span class="badge" style="color:#c4b5fd;">? Unverifiable</span>
             </div>
             <div class="hero-footer">
-                Built with GPT-4o-mini · LangChain · Tavily Search · Streamlit · PyMuPDF
-                &nbsp;|&nbsp; CogCulture Assessment · June 2026
+                GPT-4o-mini &nbsp;·&nbsp; Tavily Search &nbsp;·&nbsp; PyMuPDF &nbsp;·&nbsp; Streamlit
             </div>
         </div>
         """,
@@ -53,8 +53,8 @@ def render_dashboard_header() -> None:
     st.markdown(
         """
         <div class="section-card">
-            <div class="section-title">🔍 FactCheck AI | Automated PDF Claim Verification</div>
-            <p class="section-desc">Clean, intuitive Streamlit dashboard designed for non-technical users.</p>
+            <div class="section-title">🔍 Automated PDF Claim Verification</div>
+            <p class="section-desc">Upload a PDF · Extract claims · Search live web evidence · Get AI verdicts with confidence scores.</p>
         </div>
         """,
         unsafe_allow_html=True,
