@@ -32,13 +32,13 @@ from ui.components import (
 from ui.theme import PPT_THEME_CSS
 from utils.constants import (
     APP_NAME,
-    DEFAULT_MODEL,
     ERROR_API_KEY,
     HUMAN_REVIEW_THRESHOLD,
     MAX_PDF_SIZE_MB,
     STATUS_COLORS,
     STATUS_UNVERIFIABLE,
     SUPPORTED_MODELS,
+    get_default_model,
 )
 from utils.helpers import calculate_claim_statistics, truncate_text, validate_pdf_file
 
@@ -55,12 +55,20 @@ SAMPLE_PDF_PATH = BASE_DIR / "assets" / "sample_report.pdf"
 
 
 def configure_cloud_secrets() -> None:
-    for key in ("OPENAI_API_KEY", "TAVILY_API_KEY"):
-        try:
+    """Pull all secrets from Streamlit secrets into os.environ before any service runs."""
+    all_keys = (
+        "OPENAI_API_KEY",
+        "TAVILY_API_KEY",
+        "LLM_MODEL",
+        "SEARCH_RESULTS_COUNT",
+        "REQUEST_TIMEOUT_SECONDS",
+    )
+    try:
+        for key in all_keys:
             if not os.getenv(key) and key in st.secrets:
-                os.environ[key] = st.secrets[key]
-        except Exception:
-            continue
+                os.environ[key] = str(st.secrets[key])
+    except Exception:
+        pass
 
 
 configure_cloud_secrets()
@@ -92,7 +100,14 @@ def init_state() -> None:
 def has_required_keys() -> bool:
     openai_key = os.getenv("OPENAI_API_KEY", "")
     tavily_key = os.getenv("TAVILY_API_KEY", "")
-    return bool(openai_key and tavily_key and "your-" not in openai_key and "your-" not in tavily_key)
+    return bool(
+        openai_key
+        and tavily_key
+        and not openai_key.startswith("sk-your")
+        and not tavily_key.startswith("tvly-your")
+        and len(openai_key) > 20
+        and len(tavily_key) > 20
+    )
 
 
 def set_workflow_step(step: int) -> None:
@@ -149,10 +164,11 @@ def sidebar_controls():
                 )
 
         st.divider()
+        _default_model = get_default_model()
         model = st.selectbox(
             "🤖 AI Model",
             SUPPORTED_MODELS,
-            index=SUPPORTED_MODELS.index(DEFAULT_MODEL) if DEFAULT_MODEL in SUPPORTED_MODELS else 0,
+            index=SUPPORTED_MODELS.index(_default_model) if _default_model in SUPPORTED_MODELS else 0,
         )
         remove_duplicates = st.toggle("🔄 Remove duplicate claims", value=True)
         max_claims = st.slider("📊 Maximum claims", 5, 100, 40, step=5)

@@ -7,13 +7,34 @@ import os
 APP_NAME = "FactCheck AI"
 MAX_PDF_SIZE_MB = 50
 MAX_PDF_SIZE_BYTES = MAX_PDF_SIZE_MB * 1024 * 1024
-HUMAN_REVIEW_THRESHOLD = int(os.getenv("HUMAN_REVIEW_THRESHOLD", "60"))
+HUMAN_REVIEW_THRESHOLD = 60
 
-SEARCH_RESULTS_COUNT = int(os.getenv("SEARCH_RESULTS_COUNT", "5"))
-REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
+# These are read lazily via getters so Streamlit secrets applied in app.py take effect.
+SEARCH_RESULTS_COUNT = 5
+REQUEST_TIMEOUT_SECONDS = 30
 
-DEFAULT_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL = "gpt-4o-mini"
 SUPPORTED_MODELS = ["gpt-4o-mini", "gpt-4.1", "gpt-4o"]
+
+
+def get_default_model() -> str:
+    return os.getenv("LLM_MODEL", DEFAULT_MODEL)
+
+
+def get_search_results_count() -> int:
+    try:
+        return int(os.getenv("SEARCH_RESULTS_COUNT", str(SEARCH_RESULTS_COUNT)))
+    except ValueError:
+        return SEARCH_RESULTS_COUNT
+
+
+def get_request_timeout() -> int:
+    try:
+        return int(os.getenv("REQUEST_TIMEOUT_SECONDS", str(REQUEST_TIMEOUT_SECONDS)))
+    except ValueError:
+        return REQUEST_TIMEOUT_SECONDS
+
+
 LLM_TEMPERATURE = 0.2
 CLAIM_EXTRACTION_TEMPERATURE = 0.1
 
@@ -65,7 +86,7 @@ Return only claims that can be checked against external evidence. Focus on dates
 percentages, statistics, revenue, financial numbers, market figures, growth rates,
 technical figures, and user counts. Do not include opinions or vague marketing copy."""
 
-CLAIM_EXTRACTION_USER_PROMPT = """Extract factual claims from this text.
+CLAIM_EXTRACTION_USER_PROMPT_PREFIX = """Extract factual claims from this text.
 
 Return JSON with this exact shape:
 {"claims":[{"claim":"AI market size was $196 billion in 2024","type":"Market Statistic"}]}
@@ -75,7 +96,7 @@ Market Statistic, Financial Number, User Count, Growth Rate, Date,
 Technical Figure, Technical Specification, Revenue, Percentage, Other
 
 Text:
-{text}"""
+"""
 
 VERIFICATION_SYSTEM_PROMPT = """You are a careful fact-checking analyst.
 Compare the claim against the supplied web evidence. Classify only as:
@@ -86,16 +107,11 @@ Inaccurate means the claim is partly correct but materially outdated, incomplete
 False means credible evidence contradicts the claim or no credible evidence supports a specific assertion.
 Unverifiable means the provided evidence is insufficient."""
 
-VERIFICATION_USER_PROMPT = """Claim:
+VERIFICATION_USER_PROMPT_TEMPLATE = """Claim:
 {claim}
 
 Evidence:
 {evidence}
 
 Return JSON with this exact shape:
-{{
-  "status": "Verified",
-  "confidence": 90,
-  "explanation": "Brief reason grounded in the sources.",
-  "key_finding": "Most important supporting or contradicting fact."
-}}"""
+{{"status": "Verified", "confidence": 90, "explanation": "Brief reason grounded in the sources.", "key_finding": "Most important supporting or contradicting fact."}}"""
