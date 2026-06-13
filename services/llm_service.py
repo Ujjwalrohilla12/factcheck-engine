@@ -3,21 +3,19 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from openai import APIError, OpenAI, RateLimitError
 
+from services.config import OPENAI_API_KEY, LLM_MODEL
 from utils.constants import (
     CLAIM_EXTRACTION_SYSTEM_PROMPT,
     CLAIM_EXTRACTION_TEMPERATURE,
     CLAIM_EXTRACTION_USER_PROMPT_PREFIX,
-    ERROR_API_KEY,
     LLM_TEMPERATURE,
     VALID_STATUSES,
     VERIFICATION_SYSTEM_PROMPT,
     STATUS_UNVERIFIABLE,
-    get_default_model,
 )
 from utils.helpers import extract_json_from_text, safe_int
 from utils.retry import retry_with_backoff
@@ -26,21 +24,21 @@ logger = logging.getLogger(__name__)
 
 
 class LLMService:
-    """Thin service wrapper around OpenAI Chat Completions."""
+    """Thin wrapper around OpenAI Chat Completions."""
 
-    def __init__(self, model: str | None = None):
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError(ERROR_API_KEY)
-
-        self.client = OpenAI(api_key=api_key, timeout=60, max_retries=0)
-        self.model = model or get_default_model()
+    def __init__(self, model: str | None = None) -> None:
+        if not OPENAI_API_KEY:
+            raise ValueError(
+                "OPENAI_API_KEY is not configured. "
+                "Set it in .env (local) or Streamlit Cloud Secrets (production)."
+            )
+        self.client = OpenAI(api_key=OPENAI_API_KEY, timeout=60, max_retries=0)
+        self.model = model or LLM_MODEL
 
     def extract_claims(self, text: str) -> tuple[list[dict[str, str]], str | None]:
         """Extract factual claims as structured JSON."""
         try:
-            safe_text = text[:12000]
-            user_prompt = CLAIM_EXTRACTION_USER_PROMPT_PREFIX + safe_text
+            user_prompt = CLAIM_EXTRACTION_USER_PROMPT_PREFIX + text[:12000]
             response_text = self._json_chat(
                 system_prompt=CLAIM_EXTRACTION_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
@@ -90,7 +88,7 @@ class LLMService:
             )
             payload = extract_json_from_text(response_text, {})
             if not isinstance(payload, dict):
-                return self.default_verification("Could not parse verification response."), None
+                return self._default("Could not parse verification response."), None
             status = str(payload.get("status") or STATUS_UNVERIFIABLE).strip()
             if status not in VALID_STATUSES:
                 status = STATUS_UNVERIFIABLE
@@ -101,12 +99,12 @@ class LLMService:
                 "key_finding": str(payload.get("key_finding") or "").strip(),
             }, None
         except RateLimitError:
-            return self.default_verification("OpenAI rate limit reached."), None
+            return self._default("OpenAI rate limit reached."), None
         except APIError as exc:
-            return self.default_verification(f"OpenAI API error: {exc}"), None
+            return self._default(f"OpenAI API error: {exc}"), None
         except Exception as exc:
             logger.exception("Unexpected error during claim verification")
-            return self.default_verification(f"Verification failed: {type(exc).__name__}: {exc}"), None
+            return self._default(f"Verification failed: {type(exc).__name__}: {exc}"), None
 
     def _json_chat(
         self,
@@ -115,8 +113,6 @@ class LLMService:
         temperature: float,
         max_tokens: int,
     ) -> str:
-        """Call Chat Completions in JSON-object mode."""
-
         def _call() -> str:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -138,7 +134,7 @@ class LLMService:
         )
 
     @staticmethod
-    def default_verification(explanation: str) -> dict[str, Any]:
+    def _default(explanation: str) -> dict[str, Any]:
         return {
             "status": STATUS_UNVERIFIABLE,
             "confidence": 0,

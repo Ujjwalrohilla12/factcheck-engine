@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -11,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# ── MUST be the very first Streamlit call ─────────────────────────────────────
+# ── Page config must be the very first Streamlit call ────────────────────────
 st.set_page_config(
     page_title="FactCheck AI",
     page_icon="🔍",
@@ -19,63 +18,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Load .env for local dev (silent no-op on Streamlit Cloud) ─────────────────
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
-# ── Load Streamlit Cloud secrets → os.environ ─────────────────────────────────
-# Must run AFTER set_page_config, before any service is imported.
-_SECRET_KEYS = (
-    "OPENAI_API_KEY",
-    "TAVILY_API_KEY",
-    "LLM_MODEL",
-    "SEARCH_RESULTS_COUNT",
-    "REQUEST_TIMEOUT_SECONDS",
-)
-
-def _load_secrets() -> None:
-    """Write every Streamlit secret into os.environ."""
-    try:
-        _secrets = st.secrets
-    except FileNotFoundError:
-        return  # local dev with no secrets.toml — rely on .env
-    except Exception as exc:
-        logging.getLogger(__name__).warning("st.secrets unavailable: %s", exc)
-        return
-
-    for key in _SECRET_KEYS:
-        # Don't overwrite a value already in the environment
-        if os.environ.get(key, "").strip():
-            continue
-        value: str | None = None
-        try:
-            if key in _secrets:
-                value = str(_secrets[key]).strip() or None
-            elif "general" in _secrets and key in _secrets["general"]:
-                value = str(_secrets["general"][key]).strip() or None
-        except Exception:
-            continue
-        if value:
-            os.environ[key] = value
-
-_load_secrets()
-
-# Debug — prints to Streamlit Cloud logs (visible in app logs tab)
-print("=== FactCheck AI startup ===")
-print("OPENAI_API_KEY set:", bool(os.environ.get("OPENAI_API_KEY")))
-print("TAVILY_API_KEY set:", bool(os.environ.get("TAVILY_API_KEY")))
-
-# ── Service imports (safe now that env vars are populated) ────────────────────
-from services.claim_extractor import ClaimExtractor      # noqa: E402
-from services.demo_data import load_demo_session         # noqa: E402
-from services.pdf_parser import PDFParser                # noqa: E402
-from services.pipeline import FactCheckPipeline          # noqa: E402
-from services.report_generator import ReportGenerator    # noqa: E402
-from services.verifier import Verifier                   # noqa: E402
-from ui.components import (                              # noqa: E402
+# ── Load all secrets / env vars via the centralized config module ─────────────
+# services/config.py handles: Streamlit secrets → .env → system env
+from services.config import validate_config          # noqa: E402
+from services.claim_extractor import ClaimExtractor  # noqa: E402
+from services.demo_data import load_demo_session     # noqa: E402
+from services.pdf_parser import PDFParser            # noqa: E402
+from services.pipeline import FactCheckPipeline      # noqa: E402
+from services.report_generator import ReportGenerator# noqa: E402
+from services.verifier import Verifier               # noqa: E402
+from ui.components import (                          # noqa: E402
     render_architecture_panel,
     render_dashboard_header,
     render_hero,
@@ -86,22 +38,21 @@ from ui.components import (                              # noqa: E402
     render_verification_results,
     render_workflow,
 )
-from ui.theme import PPT_THEME_CSS                       # noqa: E402
-from utils.constants import (                            # noqa: E402
+from ui.theme import PPT_THEME_CSS                   # noqa: E402
+from utils.constants import (                        # noqa: E402
     APP_NAME,
-    ERROR_API_KEY,
     HUMAN_REVIEW_THRESHOLD,
     MAX_PDF_SIZE_MB,
     STATUS_COLORS,
     STATUS_UNVERIFIABLE,
     SUPPORTED_MODELS,
-    get_default_model,
 )
-from utils.helpers import (                              # noqa: E402
+from utils.helpers import (                          # noqa: E402
     calculate_claim_statistics,
     truncate_text,
     validate_pdf_file,
 )
+from utils.constants import get_default_model        # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,27 +62,32 @@ logger = logging.getLogger(__name__)
 
 st.markdown(PPT_THEME_CSS, unsafe_allow_html=True)
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR       = Path(__file__).parent
 SAMPLE_PDF_PATH = BASE_DIR / "assets" / "sample_report.pdf"
 
+# ── Backend config status (logged, never shown in UI) ────────────────────────
+_missing_keys = validate_config()
+if _missing_keys:
+    logger.error("Missing required config: %s", ", ".join(_missing_keys))
+else:
+    logger.info("All required API keys loaded successfully.")
 
-# ── Key helpers ───────────────────────────────────────────────────────────────
-def has_required_keys() -> bool:
-    openai = os.environ.get("OPENAI_API_KEY", "").strip()
-    tavily = os.environ.get("TAVILY_API_KEY", "").strip()
-    return bool(openai and tavily)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def _keys_ready() -> bool:
+    """True when both required backend keys are present."""
+    return len(_missing_keys) == 0
 
 
 def init_state() -> None:
     for key, val in {
-        "extracted_text": "",
-        "extracted_claims": [],
+        "extracted_text":     "",
+        "extracted_claims":   [],
         "verification_results": [],
-        "document_name": "",
-        "document_metadata": {},
-        "workflow_step": 1,
-        "demo_mode": False,
-        "show_debug": False,
+        "document_name":      "",
+        "document_metadata":  {},
+        "workflow_step":      1,
+        "demo_mode":          False,
     }.items():
         st.session_state.setdefault(key, val)
 
@@ -143,6 +99,7 @@ def set_workflow_step(step: int) -> None:
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 def sidebar_controls():
     with st.sidebar:
+        # Brand header
         st.markdown(
             """
             <div class="sidebar-brand">
@@ -156,62 +113,20 @@ def sidebar_controls():
             unsafe_allow_html=True,
         )
 
-        # API status pill
-        if has_required_keys():
+        # Backend API status pill — no keys exposed
+        if _keys_ready():
             st.markdown(
                 '<div class="api-status ok">⬤ &nbsp;API Connected</div>',
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
-                '<div class="api-status warn">⬤ &nbsp;API Keys Missing</div>',
+                '<div class="api-status warn">⬤ &nbsp;Backend config missing — '
+                'set environment variables</div>',
                 unsafe_allow_html=True,
             )
 
-        # ── Debug panel (toggle) ──────────────────────────────────────────────
-        with st.expander("🛠 Debug / Key Status", expanded=not has_required_keys()):
-            openai_val = os.environ.get("OPENAI_API_KEY", "")
-            tavily_val = os.environ.get("TAVILY_API_KEY", "")
-            openai_set = bool(openai_val.strip())
-            tavily_set = bool(tavily_val.strip())
-
-            # Show masked key preview so you can confirm the right key loaded
-            def _preview(v: str) -> str:
-                v = v.strip()
-                if not v:
-                    return "❌ not set"
-                if len(v) < 8:
-                    return "❌ too short"
-                return f"✅ {v[:6]}...{v[-4:]}"
-
-            st.markdown(
-                f"**OpenAI key:** {_preview(openai_val)}  \n"
-                f"**Tavily key:** {_preview(tavily_val)}  \n"
-                f"**Keys valid:** {'✅ Yes — ready to verify' if has_required_keys() else '❌ No'}"
-            )
-            st.caption(
-                "If both show ❌, your Streamlit Cloud secrets are not saved correctly. "
-                "Go to App Settings → Secrets and verify the keys are present and non-empty."
-            )
-            new_openai = st.text_input(
-                "OpenAI API Key",
-                type="password",
-                placeholder="sk-proj-...",
-                key="dbg_openai",
-            )
-            new_tavily = st.text_input(
-                "Tavily API Key",
-                type="password",
-                placeholder="tvly-...",
-                key="dbg_tavily",
-            )
-            if st.button("Apply Keys", use_container_width=True):
-                if new_openai.strip():
-                    os.environ["OPENAI_API_KEY"] = new_openai.strip()
-                if new_tavily.strip():
-                    os.environ["TAVILY_API_KEY"] = new_tavily.strip()
-                st.rerun()
-
+        # ── Document ──────────────────────────────────────────────────────────
         st.markdown('<div class="sidebar-section-label">DOCUMENT</div>', unsafe_allow_html=True)
         uploaded_file = st.file_uploader(
             "Upload PDF",
@@ -219,7 +134,6 @@ def sidebar_controls():
             help=f"Maximum size: {MAX_PDF_SIZE_MB} MB.",
             label_visibility="collapsed",
         )
-
         if SAMPLE_PDF_PATH.exists():
             with open(SAMPLE_PDF_PATH, "rb") as f:
                 st.download_button(
@@ -230,6 +144,7 @@ def sidebar_controls():
                     use_container_width=True,
                 )
 
+        # ── Model & Settings ──────────────────────────────────────────────────
         st.markdown('<div class="sidebar-section-label">MODEL & SETTINGS</div>', unsafe_allow_html=True)
         _default = get_default_model()
         model = st.selectbox(
@@ -239,17 +154,17 @@ def sidebar_controls():
             label_visibility="collapsed",
         )
         remove_duplicates = st.toggle("🔄 Remove duplicate claims", value=True)
-        max_claims = st.slider("📊 Max claims", 5, 100, 40, step=5)
-        min_confidence = st.slider(
+        max_claims        = st.slider("📊 Max claims", 5, 100, 40, step=5)
+        min_confidence    = st.slider(
             "🎯 Min confidence", 0, 100, 0, step=5,
             help=f"Claims below {HUMAN_REVIEW_THRESHOLD}% are flagged for review.",
         )
 
+        # ── Demo ──────────────────────────────────────────────────────────────
         st.markdown('<div class="sidebar-section-label">DEMO</div>', unsafe_allow_html=True)
         if st.button("🎬 Load Demo Dashboard", use_container_width=True):
             load_demo_session(st.session_state)
             st.rerun()
-
         if st.session_state.get("demo_mode"):
             st.markdown('<div class="demo-badge">⚡ Demo session active</div>', unsafe_allow_html=True)
 
@@ -260,33 +175,40 @@ def sidebar_controls():
 def reset_for_new_file(uploaded_file) -> None:
     if uploaded_file and uploaded_file.name != st.session_state.document_name:
         st.session_state.update({
-            "extracted_text": "",
-            "extracted_claims": [],
+            "extracted_text":     "",
+            "extracted_claims":   [],
             "verification_results": [],
-            "document_metadata": {},
-            "document_name": uploaded_file.name,
-            "demo_mode": False,
+            "document_metadata":  {},
+            "document_name":      uploaded_file.name,
+            "demo_mode":          False,
         })
         set_workflow_step(1)
 
 
 def apply_pipeline_result(result: dict) -> None:
     st.session_state.update({
-        "extracted_text": result["extracted_text"],
-        "extracted_claims": result["extracted_claims"],
+        "extracted_text":     result["extracted_text"],
+        "extracted_claims":   result["extracted_claims"],
         "verification_results": result["verification_results"],
-        "document_metadata": result["document_metadata"],
-        "document_name": result["document_name"],
-        "demo_mode": False,
+        "document_metadata":  result["document_metadata"],
+        "document_name":      result["document_name"],
+        "demo_mode":          False,
     })
     set_workflow_step(8)
+
+
+def _config_error() -> None:
+    st.error(
+        "⚙️ Backend API keys are not configured. "
+        "This is a deployment configuration issue — contact the administrator."
+    )
 
 
 def extract_text_and_claims(
     uploaded_file, model: str, remove_duplicates: bool, max_claims: int
 ) -> None:
-    if not has_required_keys():
-        st.error(ERROR_API_KEY)
+    if not _keys_ready():
+        _config_error()
         return
     is_valid, err = validate_pdf_file(uploaded_file)
     if not is_valid:
@@ -294,7 +216,7 @@ def extract_text_and_claims(
         return
 
     parser = PDFParser()
-    prog = st.progress(0, text="Step 2/8 · Reading PDF...")
+    prog   = st.progress(0, text="Step 2/8 · Reading PDF...")
     try:
         set_workflow_step(2)
         text, pdf_err = parser.extract_text(uploaded_file)
@@ -304,8 +226,8 @@ def extract_text_and_claims(
             set_workflow_step(1)
             return
 
-        st.session_state.extracted_text = text
-        st.session_state.document_metadata = parser.get_pdf_metadata(uploaded_file)
+        st.session_state.extracted_text     = text
+        st.session_state.document_metadata  = parser.get_pdf_metadata(uploaded_file)
         prog.progress(35, text="Step 3/8 · Extracting claims...")
 
         extractor = ClaimExtractor(model=model)
@@ -320,9 +242,9 @@ def extract_text_and_claims(
             set_workflow_step(2)
             return
 
-        st.session_state.extracted_claims = claims
+        st.session_state.extracted_claims     = claims
         st.session_state.verification_results = []
-        st.session_state.demo_mode = False
+        st.session_state.demo_mode            = False
         set_workflow_step(4)
         st.success(f"Extracted {len(claims)} factual claims.")
     except Exception as exc:
@@ -332,8 +254,8 @@ def extract_text_and_claims(
 
 
 def verify_claims(model: str, min_confidence: int) -> None:
-    if not has_required_keys():
-        st.error(ERROR_API_KEY)
+    if not _keys_ready():
+        _config_error()
         return
     claims = st.session_state.extracted_claims
     if not claims:
@@ -341,11 +263,11 @@ def verify_claims(model: str, min_confidence: int) -> None:
         return
 
     verifier = Verifier(model=model)
-    prog = st.progress(0, text="Step 5/8 · Searching web evidence...")
-    slot = st.empty()
+    prog     = st.progress(0, text="Step 5/8 · Searching web evidence...")
+    slot     = st.empty()
 
     def on_progress(current: int, total: int) -> None:
-        pct = int((current / total) * 100) if total else 0
+        pct   = int((current / total) * 100) if total else 0
         label = (f"Step 5/8 · Search ({current}/{total})" if pct < 70
                  else f"Step 6/8 · AI verdict ({current}/{total})")
         prog.progress(pct, text=label)
@@ -363,7 +285,7 @@ def verify_claims(model: str, min_confidence: int) -> None:
             st.error(f"Verification failed: {err}")
             return
         st.session_state.verification_results = results
-        st.session_state.demo_mode = False
+        st.session_state.demo_mode            = False
         set_workflow_step(7)
         review_count = sum(1 for r in results if r.get("needs_review"))
         st.success(f"Verified {len(results)} claims. {review_count} flagged for review.")
@@ -378,13 +300,13 @@ def run_full_pipeline(
     uploaded_file, model: str, remove_duplicates: bool,
     max_claims: int, min_confidence: int,
 ) -> None:
-    if not has_required_keys():
-        st.error(ERROR_API_KEY)
+    if not _keys_ready():
+        _config_error()
         return
 
     pipeline = FactCheckPipeline(model=model)
-    prog = st.progress(0, text="Starting pipeline...")
-    slot = st.empty()
+    prog     = st.progress(0, text="Starting pipeline...")
+    slot     = st.empty()
 
     def on_progress(msg: str, pct: int) -> None:
         prog.progress(min(pct, 100), text=msg)
@@ -416,7 +338,7 @@ def run_full_pipeline(
         st.error(f"Pipeline failed: {exc}")
 
 
-# ── Render helpers ────────────────────────────────────────────────────────────
+# ── Render panels ─────────────────────────────────────────────────────────────
 def render_upload_panel(
     uploaded_file, model: str, remove_duplicates: bool,
     max_claims: int, min_confidence: int,
@@ -456,7 +378,7 @@ def render_upload_panel(
     meta = st.session_state.document_metadata
     if meta:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Pages", meta.get("pages", 0))
+        c1.metric("Pages",     meta.get("pages", 0))
         c2.metric("File Size", f"{meta.get('file_size_mb', 0):.2f} MB")
         c3.metric("Characters", f"{len(st.session_state.extracted_text):,}")
 
@@ -490,16 +412,16 @@ def render_detailed_report() -> None:
 
     stats = calculate_claim_statistics(results)
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total", stats["total"])
-    c2.metric("Verified", stats["verified"])
-    c3.metric("Inaccurate", stats["inaccurate"])
-    c4.metric("False", stats["false"])
+    c1.metric("Total",        stats["total"])
+    c2.metric("Verified",     stats["verified"])
+    c3.metric("Inaccurate",   stats["inaccurate"])
+    c4.metric("False",        stats["false"])
     c5.metric("Avg Confidence", f"{stats['avg_confidence']}%")
     st.markdown("---")
 
     for idx, result in enumerate(results, 1):
         status = result.get("status", STATUS_UNVERIFIABLE)
-        color = STATUS_COLORS.get(status, STATUS_COLORS[STATUS_UNVERIFIABLE])
+        color  = STATUS_COLORS.get(status, STATUS_COLORS[STATUS_UNVERIFIABLE])
         review_note = ""
         if result.get("needs_review"):
             review_note = (
@@ -543,7 +465,7 @@ def render_download_panel() -> None:
         return
 
     gen = ReportGenerator()
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
     set_workflow_step(8)
 
     st.markdown(
@@ -563,23 +485,24 @@ def render_download_panel() -> None:
         if err:
             st.error(err)
         else:
-            st.download_button("Download CSV", data=data, file_name=f"factcheck_{ts}.csv", mime="text/csv", use_container_width=True, key="csv_dl")
-
+            st.download_button("Download CSV", data=data, file_name=f"factcheck_{ts}.csv",
+                               mime="text/csv", use_container_width=True, key="csv_dl")
     with c2:
         st.markdown("<div class='report-card'><h4>📄 PDF</h4><div class='report-audience'>Executives & Clients</div></div>", unsafe_allow_html=True)
         data, err = gen.generate_pdf_report(results)
         if err:
             st.error(err)
         else:
-            st.download_button("Download PDF", data=data, file_name=f"factcheck_{ts}.pdf", mime="application/pdf", use_container_width=True, key="pdf_dl")
-
+            st.download_button("Download PDF", data=data, file_name=f"factcheck_{ts}.pdf",
+                               mime="application/pdf", use_container_width=True, key="pdf_dl")
     with c3:
         st.markdown("<div class='report-card'><h4>📝 Markdown</h4><div class='report-audience'>Developers & Docs</div></div>", unsafe_allow_html=True)
         data, err = gen.generate_markdown_report(results)
         if err:
             st.error(err)
         else:
-            st.download_button("Download MD", data=data, file_name=f"factcheck_{ts}.md", mime="text/markdown", use_container_width=True, key="md_dl")
+            st.download_button("Download MD", data=data, file_name=f"factcheck_{ts}.md",
+                               mime="text/markdown", use_container_width=True, key="md_dl")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -590,15 +513,14 @@ def main() -> None:
     uploaded_file, model, remove_duplicates, max_claims, min_confidence = sidebar_controls()
     reset_for_new_file(uploaded_file)
 
-    if not has_required_keys() and not st.session_state.get("demo_mode"):
+    if not _keys_ready() and not st.session_state.get("demo_mode"):
         st.markdown(
             """
             <div class="banner-warn">
-                🔑 <strong>API keys not configured.</strong>
-                Add <code>OPENAI_API_KEY</code> and <code>TAVILY_API_KEY</code>
-                in <strong>Streamlit Cloud → App Settings → Secrets</strong>,
-                or use the <strong>🛠 Debug / Key Status</strong> panel in the sidebar
-                to enter keys manually for this session.
+                ⚙️ <strong>Backend not configured.</strong>
+                The administrator must set <code>OPENAI_API_KEY</code> and
+                <code>TAVILY_API_KEY</code> as environment variables.
+                Use <strong>Load Demo Dashboard</strong> to explore the UI.
             </div>
             """,
             unsafe_allow_html=True,
